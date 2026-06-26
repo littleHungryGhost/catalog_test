@@ -101,14 +101,14 @@ log_info "结果目录:      $RESULTS_DIR"
 if [ "$DRY_RUN" = true ]; then
     echo ""
     log_info "[DRY-RUN] 将执行以下步骤:"
-    echo "  0. 编译/部署 iceberg_fdw"
-    echo "  1. 编译 Catalog (带 --coverage，完成后恢复 Makefile)"
-    echo "  2. 部署 .so 和扩展文件"
-    echo "  3. 重启数据库"
-    echo "  4. 创建测试库 + 安装扩展"
-    echo "  5. 运行 SQL 测试用例"
-    echo "  6. 停止数据库 + 生成覆盖率报告"
-    echo "  7. 恢复数据库"
+    echo "  0. 编译部署 iceberg_fdw 依赖扩展"
+    echo "  1. 编译 iceberg_catalog 扩展（带 --coverage 插桩，完成后恢复 Makefile）"
+    echo "  2. 安装 iceberg_catalog 扩展文件到 openGauss 目录"
+    echo "  3. 重启 openGauss 数据库"
+    echo "  4. 创建测试库并安装 iceberg_catalog + iceberg_fdw 扩展"
+    echo "  5. 运行 SQL 测试用例 (来自 Catalog 仓 test/sql/)"
+    echo "  6. 停止数据库 → 生成 gcovr 覆盖率报告"
+    echo "  7. 恢复数据库 + 清理测试库"
     echo ""
     echo "  Makefile 备份/恢复机制:"
     echo "    - 编译前备份 $CATALOG_REPO/Makefile"
@@ -134,7 +134,7 @@ export ICEBERG_WAREHOUSE
 # ══════════════════════════════════════════════════════════════════════════
 FULL_STEP=0
 
-log_step "$FULL_STEP/9" "iceberg_fdw"
+log_step "$FULL_STEP/9" "编译部署 iceberg_fdw 依赖扩展"
 
 if [ "$SKIP_FDW_BUILD" = "true" ]; then
     log_info "跳过 FDW 编译 (SKIP_FDW_BUILD=true)"
@@ -162,7 +162,7 @@ FULL_STEP=$((FULL_STEP + 1))
 # ══════════════════════════════════════════════════════════════════════════
 # 步骤 1: 编译 Catalog（带 --coverage，非破坏式）
 # ══════════════════════════════════════════════════════════════════════════
-log_step "$FULL_STEP/9" "编译 Catalog (--coverage)"
+log_step "$FULL_STEP/9" "编译 iceberg_catalog 扩展（带 --coverage 插桩）"
 
 CATALOG_MAKEFILE="$CATALOG_REPO/Makefile"
 MAKEFILE_BACKUP="$CATALOG_REPO/Makefile.bak.coverage.$$"
@@ -234,7 +234,7 @@ FULL_STEP=$((FULL_STEP + 1))
 # ══════════════════════════════════════════════════════════════════════════
 # 步骤 2: 部署 .so + 扩展文件
 # ══════════════════════════════════════════════════════════════════════════
-log_step "$FULL_STEP/9" "部署 .so + 扩展文件"
+log_step "$FULL_STEP/9" "安装 iceberg_catalog 扩展文件到 openGauss"
 
 ensure_dir "$PLUGIN_DIR"
 ensure_dir "$PROC_SRCLIB"
@@ -281,7 +281,7 @@ FULL_STEP=$((FULL_STEP + 1))
 # ══════════════════════════════════════════════════════════════════════════
 # 步骤 4: 创建测试数据库 + 安装扩展
 # ══════════════════════════════════════════════════════════════════════════
-log_step "$FULL_STEP/9" "创建测试数据库"
+log_step "$FULL_STEP/9" "创建测试库并安装 iceberg_catalog + iceberg_fdw 扩展"
 
 gsql -d postgres -p "$PORT" -c "DROP DATABASE IF EXISTS $TEST_DB;" > /dev/null 2>&1 || true
 gsql -d postgres -p "$PORT" -c "CREATE DATABASE $TEST_DB;" > /dev/null 2>&1
