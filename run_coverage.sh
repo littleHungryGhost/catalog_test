@@ -51,14 +51,6 @@ if [ -f "$CONFIG_USER" ]; then
     source "$CONFIG_USER"
 fi
 
-# ── 运行时路径（从 pg_config 动态获取）───────────────────────────────────
-PG_LIB="$($PG_CONFIG --pkglibdir)"
-PG_SHARE="$($PG_CONFIG --sharedir)"
-PLUGIN_DIR="$PG_LIB/pg_plugin"
-PROC_SRCLIB="$PG_LIB/proc_srclib"
-EXT_DIR="$PG_SHARE/extension"
-DEPS_DIR="$CATALOG_REPO/deps"
-
 TIMESTAMP=$(date +%Y%m%d%H%M%S)
 RESULTS_DIR="$SCRIPT_DIR/results/$TIMESTAMP"
 COV_DIR="$RESULTS_DIR/coverage"
@@ -70,10 +62,11 @@ log_step "0/9" "前置校验"
 
 VALIDATION_FAILED=0
 
+# 先校验 pg_config 命令可用，再从中派生路径（避免 pg_config 不存在时直接 crash）
+require_cmd "$PG_CONFIG" || { VALIDATION_FAILED=1; }
 require_cmd gsql || { VALIDATION_FAILED=1; }
 require_cmd gs_ctl || { VALIDATION_FAILED=1; }
 require_cmd gcovr || { VALIDATION_FAILED=1; }
-require_cmd "$PG_CONFIG" || { VALIDATION_FAILED=1; }
 
 require_path "$CATALOG_REPO/Makefile" || { VALIDATION_FAILED=1; }
 require_path "$CATALOG_REPO/src" || { VALIDATION_FAILED=1; }
@@ -92,6 +85,15 @@ if [ "$VALIDATION_FAILED" -ne 0 ]; then
 fi
 
 log_success "前置校验通过"
+
+# ── 运行时路径（从 pg_config 动态获取，校验通过后才执行）──────────────────
+PG_LIB="$($PG_CONFIG --pkglibdir)"
+PG_SHARE="$($PG_CONFIG --sharedir)"
+PLUGIN_DIR="$PG_LIB/pg_plugin"
+PROC_SRCLIB="$PG_LIB/proc_srclib"
+EXT_DIR="$PG_SHARE/extension"
+DEPS_DIR="$CATALOG_REPO/deps"
+
 log_info "Catalog 仓:    $CATALOG_REPO"
 log_info "FDW 仓:        $ICEBERG_FDW_REPO"
 log_info "数据目录:      $DATADIR"
