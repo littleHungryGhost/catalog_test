@@ -1,0 +1,25 @@
+# Log files
+*.log
+
+# SQL output
+*.sql.out
+
+# Temporary files
+*.tmp
+*.swp
+*.swo
+
+# Coverage data
+*.gcda
+*.gcno
+*.gcov
+coverage/
+html/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
