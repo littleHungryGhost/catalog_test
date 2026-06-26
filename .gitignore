@@ -20,6 +20,13 @@ html/
 .vscode/
 .idea/
 
+# Project: user config overrides (not tracked)
+config.sh
+
+# Project: runtime output
+results/
+tmp/
+
 # OS
 .DS_Store
 Thumbs.db
