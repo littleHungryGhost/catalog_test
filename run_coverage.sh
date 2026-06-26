@@ -103,7 +103,7 @@ if [ "$DRY_RUN" = true ]; then
     log_info "[DRY-RUN] 将执行以下步骤:"
     echo "  0. 编译部署 iceberg_fdw 依赖扩展"
     echo "  1. 编译 iceberg_catalog 扩展（带 --coverage 插桩，完成后恢复 Makefile）"
-    echo "  2. 安装 iceberg_catalog 扩展文件到 openGauss 目录"
+    echo "  2. 安装 iceberg_catalog 扩展及 Rust 桥接依赖到 openGauss 目录"
     echo "  3. 重启 openGauss 数据库"
     echo "  4. 创建测试库并安装 iceberg_catalog + iceberg_fdw 扩展"
     echo "  5. 运行 SQL 测试用例 (来自 Catalog 仓 test/sql/)"
@@ -234,7 +234,7 @@ FULL_STEP=$((FULL_STEP + 1))
 # ══════════════════════════════════════════════════════════════════════════
 # 步骤 2: 部署 .so + 扩展文件
 # ══════════════════════════════════════════════════════════════════════════
-log_step "$FULL_STEP/9" "安装 iceberg_catalog 扩展文件到 openGauss"
+log_step "$FULL_STEP/9" "安装 iceberg_catalog 扩展及 Rust 桥接依赖到 openGauss"
 
 ensure_dir "$PLUGIN_DIR"
 ensure_dir "$PROC_SRCLIB"
