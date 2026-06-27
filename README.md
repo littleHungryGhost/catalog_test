@@ -46,14 +46,12 @@ bash run_coverage.sh --verbose
 | `ICEBERG_FDW_REPO` | `/home/zyp/gaussdb/iceberg_fdw` | iceberg_fdw 依赖仓路径 |
 | `OPENGAUSS_INCLUDE` | `…/openGauss-server-datainfra/src/include` | openGauss 头文件路径 |
 | `DATADIR` | `/home/zyp/gaussdb/datanodes` | openGauss 数据目录 |
-| `PORT` | `37555` | 数据库端口 |
-| `TEST_DB` | `coverage_test` | 测试数据库名（自动创建/销毁） |
+| `PORT` | `37555` | 数据库端口（通过 `TEST_PORT` 传递给 run_tests.sh） |
 | `PG_CONFIG` | `pg_config` | pg_config 命令路径 |
 | `ICEBERG_WAREHOUSE` | `file:///tmp/iceberg_warehouse` | Iceberg 仓库 URI |
 | `GCOVR_OPTIONS` | `--exclude-unreachable-branches` | gcovr 额外选项 |
 | `SKIP_FDW_BUILD` | `false` | 跳过 FDW 编译部署 |
 | `SKIP_DB_RESTART` | `false` | 跳过数据库启停 |
-| `KEEP_TEST_DB` | `false` | 保留测试库（调试用） |
 
 ### 示例
 
@@ -78,17 +76,20 @@ SKIP_DB_RESTART=true bash run_coverage.sh
 ## 执行流程
 
 ```
-0/9  前置校验        → 检查所有命令和路径
-1/9  iceberg_fdw     → 编译部署 FDW 依赖（可跳过）
-2/9  编译 Catalog    → 插入 --coverage → make → 恢复 Makefile
-3/9  部署            → 复制 .so 和扩展文件到 pg 目录
-4/9  重启数据库      → 停库 → 清理 .gcda → 启库
-5/9  创建测试库      → 创建库 → 安装扩展
-6/9  运行测试        → 遍历 test/sql/*.sql，统计 PASS/FAIL
-7/9  生成报告        → 停库 → gcovr 生成 HTML 覆盖率报告
-8/9  恢复            → 启库 → 清理测试库（可保留）
+0/6  前置校验        → 检查所有命令和路径
+1/6  iceberg_fdw     → 编译部署 FDW 依赖（可跳过）
+2/6  编译 Catalog    → 插入 --coverage → make → 恢复 Makefile
+3/6  部署            → 复制 .so 和扩展文件到 pg 目录
+4/6  重启数据库      → 停库 → 清理 .gcda → 启库
+5/6  运行测试        → 委托 Catalog 仓 test/run_tests.sh（归一化 + diff 对比预期）
+6/6  生成报告        → 停库 → gcovr → 启库
      生成摘要        → results/<timestamp>/summary.txt
 ```
+
+测试执行委托给 Catalog 仓自带的 `test/run_tests.sh`，它提供：
+- 输出归一化（UUID → `<uuid>`，时间戳 → `<ts>`）
+- 与 `test/expected/` 下的预期基线做 diff 对比
+- 自行管理测试库的创建/销毁
 
 ## 输出结构
 
@@ -104,10 +105,10 @@ results/20250626120000/
 │   ├── fdw_build.log           # FDW 编译日志
 │   ├── gaussdb.log             # 数据库日志
 │   ├── gcovr.log               # gcovr 输出
+│   ├── run_tests.log           # run_tests.sh 完整输出
 │   └── coverage_summary.txt    # 各文件覆盖率百分比
 ├── sql_outputs/
-│   ├── 001_basic.out           # 每个测试的原始 SQL 输出
-│   ├── 002_query.out
+│   ├── add_column.out          # 归一化后的测试输出（来自 run_tests.sh）
 │   └── ...
 └── summary.txt                 # 运行摘要（配置快照、通过/失败数）
 ```
