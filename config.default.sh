@@ -24,11 +24,8 @@ OPENGAUSS_INCLUDE="${OPENGAUSS_INCLUDE:-/home/zyp/gaussdb/openGauss-server-datai
 # openGauss data directory
 DATADIR="${DATADIR:-/home/zyp/gaussdb/datanodes}"
 
-# Database port
+# Database port (passed to Catalog's run_tests.sh via TEST_PORT)
 PORT="${PORT:-37555}"
-
-# Name of the test database to create/destroy
-TEST_DB="${TEST_DB:-coverage_test}"
 
 # ── Tool paths ───────────────────────────────────────────────────────────
 # pg_config binary (must be on PATH or specify absolute path)
@@ -49,6 +46,3 @@ SKIP_FDW_BUILD="${SKIP_FDW_BUILD:-false}"
 # Skip database stop/start cycle (set to "true" if DB is already running
 # with the correct extensions loaded)
 SKIP_DB_RESTART="${SKIP_DB_RESTART:-false}"
-
-# Keep the test database after the run (set to "true" for manual inspection)
-KEEP_TEST_DB="${KEEP_TEST_DB:-false}"
