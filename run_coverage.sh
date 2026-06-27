@@ -1,25 +1,24 @@
 #!/bin/bash
-# run_coverage.sh — 配置驱动的覆盖率测试流程
+# run_coverage.sh — 配置驱动的多套件覆盖率测试工具
 #
 # 用法:
-#   bash run_coverage.sh              # 完整运行
-#   bash run_coverage.sh --dry-run    # 仅校验配置，不执行实际操作
-#   bash run_coverage.sh --verbose    # 显示完整编译和 SQL 输出
+#   bash run_coverage.sh              # 完整运行（所有 TEST_SUITES 套件）
+#   bash run_coverage.sh --dry-run    # 校验配置，打印执行计划
+#   bash run_coverage.sh --verbose    # 显示完整编译和测试输出
 #
-# 测试执行委托给 Catalog 仓自带的 test/run_tests.sh（带输出归一化和预期基线对比）。
-# 本脚本只负责 coverage 特有流程：编译插桩、部署、DB 启停、覆盖率报告生成。
+# 测试执行委托给 Catalog 仓自带的 test/run_*.sh 脚本。
+# 本脚本负责: 配置 → 编译插桩 → 部署 → 循环各套件 → 覆盖率报告。
 #
 # 配置: 复制 config.default.sh 为 config.sh 并修改需要的变量
 #       或通过环境变量覆盖任意配置项
 
-# ── 加载环境（必须在 set -u 之前）────────────────────────────────────────
+# ── 加载环境 ─────────────────────────────────────────────────────────────
 source ~/.bashrc 2>/dev/null || true
-
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# ── 解析命令行选项 ────────────────────────────────────────────────────────
+# ── 解析命令行选项 ──────────────────────────────────────────────────────
 DRY_RUN=false
 VERBOSE=false
 
@@ -37,7 +36,7 @@ for arg in "$@"; do
     esac
 done
 
-# ── 加载配置 ──────────────────────────────────────────────────────────────
+# ── 加载配置和工具库 ────────────────────────────────────────────────────
 source "$SCRIPT_DIR/lib/helpers.sh"
 
 CONFIG_DEFAULT="$SCRIPT_DIR/config.default.sh"
@@ -54,17 +53,17 @@ if [ -f "$CONFIG_USER" ]; then
     source "$CONFIG_USER"
 fi
 
+source "$SCRIPT_DIR/lib/coverage.sh"
+source "$SCRIPT_DIR/lib/run_suite.sh"
+
 TIMESTAMP=$(date +%Y%m%d%H%M%S)
 RESULTS_DIR="$SCRIPT_DIR/results/$TIMESTAMP"
 COV_DIR="$RESULTS_DIR/coverage"
 LOG_DIR="$RESULTS_DIR/logs"
 SQL_OUT_DIR="$RESULTS_DIR/sql_outputs"
 
-# 总步骤数
-TOTAL_STEPS=6
-
-# ── 前置校验 ──────────────────────────────────────────────────────────────
-log_step "0/$TOTAL_STEPS" "前置校验"
+# ── 前置校验 ────────────────────────────────────────────────────────────
+log_step "0/?" "前置校验"
 
 VALIDATION_FAILED=0
 
@@ -72,16 +71,21 @@ require_cmd "$PG_CONFIG" || { VALIDATION_FAILED=1; }
 require_cmd gsql || { VALIDATION_FAILED=1; }
 require_cmd gs_ctl || { VALIDATION_FAILED=1; }
 require_cmd gcovr || { VALIDATION_FAILED=1; }
-require_cmd python3 || { VALIDATION_FAILED=1; }   # run_tests.sh 归一化需要
+require_cmd python3 || { VALIDATION_FAILED=1; }
 
 require_path "$CATALOG_REPO/Makefile" || { VALIDATION_FAILED=1; }
 require_path "$CATALOG_REPO/src" || { VALIDATION_FAILED=1; }
-require_path "$CATALOG_REPO/test/run_tests.sh" || { VALIDATION_FAILED=1; }
 require_path "$DATADIR" || { VALIDATION_FAILED=1; }
 
 if [ "$SKIP_FDW_BUILD" != "true" ]; then
     require_path "$ICEBERG_FDW_REPO/Makefile" || { VALIDATION_FAILED=1; }
 fi
+
+# 校验每个套件的 runner 路径
+for entry in "${TEST_SUITES[@]}"; do
+    IFS='|' read -r sid sname stype spath sargs <<< "$entry"
+    require_path "$CATALOG_REPO/test/$spath" || { VALIDATION_FAILED=1; }
+done
 
 if [ "$VALIDATION_FAILED" -ne 0 ]; then
     echo ""
@@ -93,7 +97,7 @@ fi
 
 log_success "前置校验通过"
 
-# ── 运行时路径（从 pg_config 动态获取，校验通过后才执行）──────────────────
+# ── 运行时路径（从 pg_config 动态获取）─────────────────────────────────
 PG_LIB="$($PG_CONFIG --pkglibdir)"
 PG_SHARE="$($PG_CONFIG --sharedir)"
 PLUGIN_DIR="$PG_LIB/pg_plugin"
@@ -106,25 +110,28 @@ log_info "FDW 仓:        $ICEBERG_FDW_REPO"
 log_info "数据目录:      $DATADIR"
 log_info "端口:          $PORT"
 log_info "结果目录:      $RESULTS_DIR"
+log_info "测试套件:      共 ${#TEST_SUITES[@]} 个"
 
 if [ "$DRY_RUN" = true ]; then
     echo ""
     log_info "[DRY-RUN] 将执行以下步骤:"
-    echo "  0. 编译部署 iceberg_fdw 依赖扩展"
-    echo "  1. 编译 iceberg_catalog 扩展（带 --coverage 插桩，完成后恢复 Makefile）"
-    echo "  2. 安装 iceberg_catalog 扩展及 Rust 桥接依赖到 openGauss 目录"
-    echo "  3. 重启 openGauss 数据库"
-    echo "  4. 调用 Catalog 仓 test/run_tests.sh 运行 SQL 测试（含归一化 + 预期对比）"
-    echo "  5. 停止数据库 → 生成 gcovr 覆盖率报告"
-    echo "  6. 恢复数据库"
+    echo "  Phase 0 — Build:"
+    echo "    0.1  编译部署 iceberg_fdw 依赖扩展"
+    echo "    0.2  编译 iceberg_catalog（带 --coverage，完成后恢复 Makefile）"
+    echo "    0.3  安装 iceberg_catalog 扩展及 Rust 桥接依赖"
+    echo "  Phase 1 — 独立覆盖率（每套件一轮，轮间清理 .gcda）:"
+    for entry in "${TEST_SUITES[@]}"; do
+        IFS='|' read -r sid sname stype spath sargs <<< "$entry"
+        echo "    → $sid ($sname) — $CATALOG_REPO/test/$spath"
+    done
+    if [ "$COMBINED_REPORT" = "true" ]; then
+        echo "  Phase 2 — 累加覆盖率: 重跑全部套件不清理 .gcda → coverage/combined/"
+    fi
+    echo "  Phase 3 — 恢复数据库 + 汇总"
     echo ""
-    echo "  Makefile 备份/恢复机制:"
-    echo "    - 编译前备份 $CATALOG_REPO/Makefile"
-    echo "    - 插入 --coverage 后编译"
-    echo "    - 编译完成后立即恢复原始 Makefile"
-    echo "    - trap EXIT/INT/TERM 保证异常退出时也恢复"
+    echo "  Makefile 备份/恢复: 编译前备份，完成后 sha256sum 校验"
+    echo "  .gcda 归档:         gcda_snapshots/<suite_id>/"
     echo ""
-    echo "  测试执行委托给: $CATALOG_REPO/test/run_tests.sh"
     echo "  如果确认无误，执行: bash $0"
     exit 0
 fi
@@ -134,16 +141,15 @@ ensure_dir "$COV_DIR"
 ensure_dir "$LOG_DIR"
 ensure_dir "$SQL_OUT_DIR"
 
-# run_tests.sh 需要的环境变量
 export ICEBERG_WAREHOUSE
 export TEST_PORT="$PORT"
 
 # ══════════════════════════════════════════════════════════════════════════
-# 步骤 0: 编译/部署 iceberg_fdw
+# Phase 0 — Build（一次编译，非破坏式）
 # ══════════════════════════════════════════════════════════════════════════
-STEP=0
 
-log_step "$STEP/$TOTAL_STEPS" "编译部署 iceberg_fdw 依赖扩展"
+# ── 0.1 iceberg_fdw ──────────────────────────────────────────────────────
+log_step "Build.1" "编译部署 iceberg_fdw 依赖扩展"
 
 if [ "$SKIP_FDW_BUILD" = "true" ]; then
     log_info "跳过 FDW 编译 (SKIP_FDW_BUILD=true)"
@@ -165,12 +171,8 @@ cp "$ICEBERG_FDW_REPO/iceberg_fdw.control" "$EXT_DIR/" 2>/dev/null || true
 cp "$ICEBERG_FDW_REPO/iceberg_fdw--0.1.0.sql" "$EXT_DIR/" 2>/dev/null || true
 log_success "iceberg_fdw 部署完成"
 
-STEP=$((STEP + 1))
-
-# ══════════════════════════════════════════════════════════════════════════
-# 步骤 1: 编译 Catalog（带 --coverage，非破坏式）
-# ══════════════════════════════════════════════════════════════════════════
-log_step "$STEP/$TOTAL_STEPS" "编译 iceberg_catalog 扩展（带 --coverage 插桩）"
+# ── 0.2 Catalog --coverage ────────────────────────────────────────────────
+log_step "Build.2" "编译 iceberg_catalog 扩展（带 --coverage 插桩）"
 
 CATALOG_MAKEFILE="$CATALOG_REPO/Makefile"
 MAKEFILE_BACKUP="$CATALOG_REPO/Makefile.bak.coverage.$$"
@@ -193,9 +195,6 @@ trap 'restore_makefile' EXIT INT TERM
 
 if ! grep -q -- '--coverage' "$CATALOG_MAKEFILE"; then
     sed -i 's/override CXXFLAGS := $(filter-out -fPIE,$(CXXFLAGS)) -fPIC/override CXXFLAGS := $(filter-out -fPIE,$(CXXFLAGS)) -fPIC --coverage/' "$CATALOG_MAKEFILE"
-    log_info "已添加 --coverage 标志"
-else
-    log_info "--coverage 标志已存在"
 fi
 
 log_info "开始编译..."
@@ -226,12 +225,8 @@ ls "$CATALOG_REPO"/src/*.gcno 2>/dev/null | while read f; do
     log_info "  $(basename "$f")"
 done
 
-STEP=$((STEP + 1))
-
-# ══════════════════════════════════════════════════════════════════════════
-# 步骤 2: 安装扩展文件
-# ══════════════════════════════════════════════════════════════════════════
-log_step "$STEP/$TOTAL_STEPS" "安装 iceberg_catalog 扩展及 Rust 桥接依赖到 openGauss"
+# ── 0.3 部署 .so + 扩展文件 ──────────────────────────────────────────────
+log_step "Build.3" "安装 iceberg_catalog 扩展及 Rust 桥接依赖到 openGauss"
 
 ensure_dir "$PLUGIN_DIR"
 ensure_dir "$PROC_SRCLIB"
@@ -249,119 +244,85 @@ cp "$SO_SRC" "$PROC_SRCLIB/iceberg_catalog.so"
 cp "$DEPS_DIR/libiceberg_rust_bridge.so" "$PG_LIB/"
 log_success "已更新所有 .so 副本"
 
-STEP=$((STEP + 1))
-
 # ══════════════════════════════════════════════════════════════════════════
-# 步骤 3: 重启数据库 + 清理旧覆盖率数据
+# Phase 1 — 独立覆盖率（循环每个套件）
 # ══════════════════════════════════════════════════════════════════════════
-log_step "$STEP/$TOTAL_STEPS" "重启 openGauss 数据库"
 
-if [ "$SKIP_DB_RESTART" = "true" ]; then
-    log_info "跳过数据库重启 (SKIP_DB_RESTART=true)"
-else
-    gs_ctl stop -D "$DATADIR" -l "$LOG_DIR/gaussdb.log" 2>/dev/null || true
-    sleep 2
+SUITE_RESULTS=()    # "suite_id|display_name|pass|fail|cov_pct"
+OVERALL_PASS=0
+OVERALL_FAIL=0
 
-    rm -f "$CATALOG_REPO"/src/*.gcda
-    mkdir -p /tmp/iceberg_warehouse
+for entry in "${TEST_SUITES[@]}"; do
+    IFS='|' read -r suite_id display_name stype spath sargs <<< "$entry"
 
-    gs_ctl start -D "$DATADIR" -l "$LOG_DIR/gaussdb.log" -o "-p $PORT" 2>&1 | tail -1
-    sleep 1
-    log_success "数据库已启动"
-fi
-
-STEP=$((STEP + 1))
-
-# ══════════════════════════════════════════════════════════════════════════
-# 步骤 4: 运行测试（委托给 Catalog 仓 test/run_tests.sh）
-# ══════════════════════════════════════════════════════════════════════════
-log_step "$STEP/$TOTAL_STEPS" "运行 SQL 测试（调用 Catalog 仓 test/run_tests.sh）"
-log_info "测试脚本: $CATALOG_REPO/test/run_tests.sh"
-
-TEST_RUNNER="$CATALOG_REPO/test/run_tests.sh"
-TEST_LOG="$LOG_DIR/run_tests.log"
-
-# run_tests.sh 从它所在目录自动找到 common.sh、sql/、expected/ 等路径
-if [ "$VERBOSE" = true ]; then
-    (cd "$CATALOG_REPO" && bash "$TEST_RUNNER") 2>&1 | tee "$TEST_LOG"
-    TEST_EXIT="${PIPESTATUS[0]}"
-else
-    (cd "$CATALOG_REPO" && bash "$TEST_RUNNER") > "$TEST_LOG" 2>&1
-    TEST_EXIT=$?
-fi
-
-# 从 run_tests.sh 输出中提取 pass/fail 计数
-PASS=$(grep -oP '\d+(?= passed)' "$TEST_LOG" 2>/dev/null || echo "0")
-FAIL=$(grep -oP '\d+(?= failed)' "$TEST_LOG" 2>/dev/null || echo "0")
-PASS="${PASS:-0}"
-FAIL="${FAIL:-0}"
-
-# 打印测试结果摘要
-if [ "$FAIL" -eq 0 ] && [ "$PASS" -gt 0 ]; then
-    echo -e "  ${COLOR_GREEN}$PASS passed${COLOR_RESET}, ${COLOR_RED}$FAIL failed${COLOR_RESET}"
-else
-    # 打印失败详情（从日志尾部提取）
-    grep -E "✓|✗|PASS|FAIL|passed|failed" "$TEST_LOG" | tail -20 || true
     echo ""
-    echo -e "  ${COLOR_GREEN}$PASS passed${COLOR_RESET}, ${COLOR_RED}$FAIL failed${COLOR_RESET}"
-fi
+    log_step "Suite" "$display_name ($suite_id)"
 
-# 复制 run_tests.sh 的结果到我们的输出目录
-if [ -d "$CATALOG_REPO/test/results" ]; then
-    cp -r "$CATALOG_REPO/test/results/"* "$SQL_OUT_DIR/" 2>/dev/null || true
-    log_info "测试输出已复制到: $SQL_OUT_DIR/"
-fi
+    # Call the suite lifecycle (sourced, sets PASS/FAIL)
+    run_one_suite "$suite_id" "$display_name" "$stype" "$spath" "$sargs"
 
-STEP=$((STEP + 1))
-
-# ══════════════════════════════════════════════════════════════════════════
-# 步骤 5: 停止数据库 + 生成覆盖率报告
-# ══════════════════════════════════════════════════════════════════════════
-log_step "$STEP/$TOTAL_STEPS" "生成 gcovr 覆盖率报告"
-
-if [ "$SKIP_DB_RESTART" != "true" ]; then
-    gs_ctl stop -D "$DATADIR" -l "$LOG_DIR/gaussdb.log" 2>&1 | tail -1
-    sleep 1
-fi
-
-if ! ls "$CATALOG_REPO"/src/*.gcda > /dev/null 2>&1; then
-    log_warn "未找到 .gcda 文件，覆盖率数据可能不完整"
-fi
-
-gcovr \
-    --root "$CATALOG_REPO" \
-    --object-directory "$CATALOG_REPO/src" \
-    --html --html-details \
-    --output "$COV_DIR/index.html" \
-    $GCOVR_OPTIONS \
-    --print-summary \
-    2>&1 | tee "$LOG_DIR/gcovr.log"
-
-echo ""
-log_info "各文件覆盖率:"
-gcovr --root "$CATALOG_REPO" --object-directory "$CATALOG_REPO/src" 2>&1 | \
-    grep -E "^src/|^TOTAL|^--" | tee "$LOG_DIR/coverage_summary.txt" || true
-
-echo ""
-log_info "HTML 报告: $COV_DIR/index.html"
-
-STEP=$((STEP + 1))
+    local_cov_pct="${SUITE_COV_PCT:-N/A}"
+    SUITE_RESULTS+=("$suite_id|$display_name|$PASS|$FAIL|$local_cov_pct")
+    OVERALL_PASS=$((OVERALL_PASS + PASS))
+    OVERALL_FAIL=$((OVERALL_FAIL + FAIL))
+done
 
 # ══════════════════════════════════════════════════════════════════════════
-# 步骤 6: 恢复数据库
+# Phase 2 — 累加覆盖率报告（可选）
 # ══════════════════════════════════════════════════════════════════════════
-log_step "$STEP/$TOTAL_STEPS" "恢复 openGauss 数据库"
+
+if [ "$COMBINED_REPORT" = "true" ]; then
+    echo ""
+    log_step "Combined" "生成累加覆盖率报告（重跑全部套件，不清理 .gcda）"
+
+    if [ "$SKIP_DB_RESTART" != "true" ]; then
+        gs_ctl stop -D "$DATADIR" -l "$LOG_DIR/gaussdb.log" 2>/dev/null || true
+        sleep 1
+        clean_gcda
+        mkdir -p /tmp/iceberg_warehouse
+        gs_ctl start -D "$DATADIR" -l "$LOG_DIR/gaussdb.log" -o "-p $PORT" 2>&1 | tail -1
+        sleep 1
+    fi
+
+    for entry in "${TEST_SUITES[@]}"; do
+        IFS='|' read -r suite_id display_name stype spath sargs <<< "$entry"
+
+        log_info "运行: $display_name"
+        case "$stype" in
+            sql_script)
+                (cd "$CATALOG_REPO" && bash "test/$spath" $sargs) \
+                    > "$LOG_DIR/combined_${suite_id}_runner.log" 2>&1 || true
+                ;;
+            binary)
+                "$CATALOG_REPO/test/$spath" $sargs \
+                    > "$LOG_DIR/combined_${suite_id}_runner.log" 2>&1 || true
+                ;;
+        esac
+    done
+
+    if [ "$SKIP_DB_RESTART" != "true" ]; then
+        gs_ctl stop -D "$DATADIR" -l "$LOG_DIR/gaussdb.log" 2>&1 | tail -1
+        sleep 1
+    fi
+
+    generate_coverage_report "combined" || true
+    combined_cov_pct="${SUITE_COV_PCT:-N/A}"
+    clean_gcda
+fi
+
+# ══════════════════════════════════════════════════════════════════════════
+# Phase 3 — 恢复数据库
+# ══════════════════════════════════════════════════════════════════════════
 
 if [ "$SKIP_DB_RESTART" != "true" ]; then
     gs_ctl start -D "$DATADIR" -l "$LOG_DIR/gaussdb.log" -o "-p $PORT" 2>&1 | tail -1
 fi
-
 log_success "数据库已恢复"
-# run_tests.sh 在结束后已自行清理测试库，无需额外操作
 
 # ══════════════════════════════════════════════════════════════════════════
-# 生成运行摘要
+# 汇总
 # ══════════════════════════════════════════════════════════════════════════
+
 SUMMARY_FILE="$RESULTS_DIR/summary.txt"
 
 {
@@ -371,23 +332,34 @@ SUMMARY_FILE="$RESULTS_DIR/summary.txt"
     echo ""
     echo "  Timestamp:   $TIMESTAMP"
     echo "  Catalog:     $CATALOG_REPO"
-    echo "  FDW:         $ICEBERG_FDW_REPO"
     echo "  Datadir:     $DATADIR"
     echo "  Port:        $PORT"
     echo ""
-    echo "  Tests:       $PASS passed, $FAIL failed  (via run_tests.sh)"
+    echo "── Suite Results ────────────────────"
+    for entry in "${SUITE_RESULTS[@]}"; do
+        IFS='|' read -r sid sname spass sfail scov <<< "$entry"
+        printf "  %-16s %3s passed, %3s failed   lines: %s\n" \
+            "$sid:" "$spass" "$sfail" "$scov"
+    done
     echo ""
-    echo "  Coverage:    $COV_DIR/index.html"
-    echo "  Logs:        $LOG_DIR/"
-    echo "  SQL Outputs: $SQL_OUT_DIR/"
+    echo "── Overall ──────────────────────────"
+    echo "  Suites:     ${#SUITE_RESULTS[@]} run"
+    echo "  Tests:      $OVERALL_PASS passed, $OVERALL_FAIL failed"
+    if [ "$COMBINED_REPORT" = "true" ]; then
+        echo "  Combined:   $COV_DIR/combined/index.html"
+    fi
+    echo ""
+    echo "  Coverage:   $COV_DIR/"
+    echo "  Logs:       $LOG_DIR/"
+    echo "  Artifacts:  $SQL_OUT_DIR/"
     echo ""
     echo "═══════════════════════════════════════"
 } > "$SUMMARY_FILE"
 
 cat "$SUMMARY_FILE"
 
-# ── 退出码 ────────────────────────────────────────────────────────────────
-if [ "$FAIL" -gt 0 ]; then
+# ── 退出码 ──────────────────────────────────────────────────────────────
+if [ "$OVERALL_FAIL" -gt 0 ]; then
     exit 2
 fi
 exit 0

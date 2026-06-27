@@ -39,6 +39,28 @@ ICEBERG_WAREHOUSE="${ICEBERG_WAREHOUSE:-file:///tmp/iceberg_warehouse}"
 # Extra options passed to gcovr
 GCOVR_OPTIONS="${GCOVR_OPTIONS:---exclude-unreachable-branches}"
 
+# ── Test Suite Definitions ─────────────────────────────────────────────────
+# Each entry: "suite_id|display_name|type|runner_path|runner_args"
+#
+#   suite_id       Unique short ID used for directory naming (alphanumeric + _).
+#   display_name   Human-readable label shown in logs and summary.
+#   type           "sql_script" (requires DB, auto stop/start around suite)
+#                  "binary"     (no DB needed, run executable directly)
+#   runner_path    Path relative to $CATALOG_REPO/test/.
+#   runner_args    Extra CLI args forwarded to the runner (optional, can be "").
+#
+# To add a suite: append an entry here or in config.sh via TEST_SUITES+=(...).
+TEST_SUITES=(
+    "serial|SQL Serial Tests|sql_script|run_tests.sh|"
+    "concurrency|Concurrency Tests|sql_script|run_concurrency_tests.sh|"
+)
+
+# ── Combined Coverage Report ────────────────────────────────────────────────
+# If "true", after all per-suite independent reports are generated, re-run
+# all suites sequentially without cleaning .gcda to produce a combined report
+# at coverage/combined/index.html.  Disable with "false" to save time.
+COMBINED_REPORT="${COMBINED_REPORT:-true}"
+
 # ── Behavior flags ───────────────────────────────────────────────────────
 # Skip iceberg_fdw build and deploy (set to "true" if already installed)
 SKIP_FDW_BUILD="${SKIP_FDW_BUILD:-false}"
